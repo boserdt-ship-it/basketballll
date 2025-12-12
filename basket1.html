@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Basketball Mini Game — Moving Hoop & Backboard</title>
+<style>
+  html,body { height:100%; margin:0; background:#000; }
+  #gameWrap { position:relative; width:520px; margin:20px auto; }
+  canvas { display:block; background:#111; border-radius:8px; }
+  #menu {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(rgba(0,0,0,0.55), rgba(0,0,0,0.55));
+    color:#fff; font-family:Arial;
+    z-index:10;
+  }
+  #startBtn {
+    background:#ff6600; color:#fff; padding:14px 28px; border-radius:10px;
+    font-size:20px; cursor:pointer; user-select:none; font-weight:700; margin-top:8px;
+  }
+  #controls { margin-top:12px; text-align:center; color:#ddd; font-size:14px; }
+  #powerLabel { margin-bottom:6px; }
+  .hud {
+    position:absolute; right:8px; top:8px; color:#fff; font-family:Arial; z-index:5;
+    background: rgba(0,0,0,0.25); padding:8px 10px; border-radius:8px;
+  }
+  #resetBtn { margin-left:8px; background:#333; color:#fff; border:none; padding:6px 10px; border-radius:6px; cursor:pointer; }
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <canvas id="game" width="480" height="720"></canvas>
+
+  <div id="menu">
+    <div style="text-align:center">
+      <div style="font-size:44px; margin-bottom:8px">🏀 Basketball</div>
+      <div id="startBtn">START</div>
+      <div id="controls">
+        <div id="powerLabel">Сила броска: <span id="powerVal">0.12</span></div>
+        <input id="powerSlider" type="range" min="0.04" max="0.28" step="0.01" value="0.12" style="width:300px"/>
+        <div style="font-size:13px; color:#bbb; margin-top:8px;">Тяни мяч и отпускай. Настрой силу →</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hud" id="hud">
+    <span id="scoreHud">Score: 0</span>
+    <button id="resetBtn">Reset</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  let ball = { x: 240, y: 650, r: 28, vx: 0, vy: 0, grabbed: false };
+  let hoop = { x: 240, y: 200, rimRadius: 55, rimThickness: 6, shake: 0, vx: 1.5, direction: 1 };
+  let particles = [];
+  let score = 0;
+  let gameStarted = false;
+  let prevBallY = ball.y;
+
+  let powerK = parseFloat(document.getElementById('powerSlider').value) || 0.12;
+  let dragStart = null;
+  let lastPointerPos = null;
+
+  function rectToCanvas(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * (canvas.width / rect.width);
+    const y = (clientY - rect.top) * (canvas.height / rect.height);
+    return { x, y };
+  }
+
+  function drawFloor() {
+    for (let i = 0; i < 20; i++) {
+      ctx.fillStyle = i % 2 ? '#b88646' : '#c69652';
+      ctx.fillRect(0, i * 36, canvas.width, 36);
+    }
+  }
+
+  function drawBall() {
+    ctx.beginPath();
+    ctx.ellipse(ball.x, ball.y + ball.r + 8, ball.r * 0.8, ball.r * 0.3, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fill();
+
+    const g = ctx.createRadialGradient(ball.x - 10, ball.y - 10, 5, ball.x, ball.y, ball.r);
+    g.addColorStop(0, '#ffca5c');
+    g.addColorStop(1, '#e45a00');
+
+    ctx.beginPath();
+    ctx.fillStyle = g;
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#5a2a00';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r * 0.95, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ball.x - ball.r, ball.y);
+    ctx.lineTo(ball.x + ball.r, ball.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ball.x, ball.y - ball.r);
+    ctx.lineTo(ball.x, ball.y + ball.r);
+    ctx.stroke();
+  }
+
+  function drawHoop() {
+    // движение кольца
+    hoop.x += hoop.vx * hoop.direction;
+    if (hoop.x < hoop.rimRadius + 20 || hoop.x > canvas.width - hoop.rimRadius - 20) hoop.direction *= -1;
+
+    const cx = hoop.x;
+    const cy = hoop.y;
+
+    // щит
+    ctx.fillStyle = '#444';
+    ctx.fillRect(cx - 60, cy - 20, 120, 10);
+
+    // круглый обруч
+    ctx.lineWidth = hoop.rimThickness;
+    ctx.strokeStyle = '#ff3d3d';
+    ctx.beginPath();
+    ctx.arc(cx, cy, hoop.rimRadius, Math.PI * 0.05, Math.PI * 0.95);
+    ctx.stroke();
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, hoop.rimRadius - 4, Math.PI * 0.05, Math.PI * 0.95);
+    ctx.stroke();
+
+    // сетка
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 2;
+    const startAngle = Math.PI * 0.1;
+    const endAngle = Math.PI * 0.9;
+    const steps = 9;
+    for (let i = 0; i < steps; i++) {
+      const ang = startAngle + (endAngle - startAngle) * (i / (steps - 1));
+      const sx = cx + Math.cos(ang) * (hoop.rimRadius - 6);
+      const sy = cy + Math.sin(ang) * (hoop.rimRadius - 6);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx - 6, sy + 30);
+      ctx.stroke();
+    }
+  }
+
+  function spawnParticles() {
+    for (let i = 0; i < 20; i++) {
+      particles.push({
+        x: hoop.x + (Math.random() - 0.5) * 20,
+        y: hoop.y + 12 + (Math.random() - 0.5) * 8,
+        vx: (Math.random() - 0.5) * 6,
+        vy: (Math.random() - 0.5) * 6,
+        life: 28
+      });
+    }
+  }
+
+  function updateParticles() {
+    for (let p of particles) {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.14;
+      p.life--;
+    }
+    particles = particles.filter(p => p.life > 0);
+  }
+
+  function drawParticles() {
+    for (let p of particles) {
+      ctx.fillStyle = `rgba(255,255,255,${Math.max(0, p.life / 28).toFixed(2)})`;
+      ctx.fillRect(p.x, p.y, 4, 4);
+    }
+  }
+
+  function drawScore() {
+    document.getElementById('scoreHud').innerText = 'Score: ' + score;
+  }
+
+  function update() {
+    if (!gameStarted) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    drawFloor();
+
+    if (!ball.grabbed) {
+      ball.vy += 0.45;
+      ball.x += ball.vx;
+      ball.y += ball.vy;
+      ball.vx *= 0.999;
+    } else {
+      if (lastPointerPos) { ball.x = lastPointerPos.x; ball.y = lastPointerPos.y; }
+      ball.vx = ball.vy = 0;
+    }
+
+    if (ball.x - ball.r < 0) { ball.x = ball.r; ball.vx *= -0.6; }
+    if (ball.x + ball.r > canvas.width) { ball.x = canvas.width - ball.r; ball.vx *= -0.6; }
+    if (ball.y - ball.r < 0) { ball.y = ball.r; ball.vy *= -0.6; }
+
+    if (ball.y > canvas.height + 60) { ball.x = 240; ball.y = 650; ball.vx = ball.vy = 0; }
+
+    const dx = ball.x - hoop.x;
+    const dy = ball.y - hoop.y;
+    const dist = Math.hypot(dx, dy);
+    const withinRim = dist < (hoop.rimRadius - 8);
+
+    if (prevBallY < hoop.y + 6 && ball.y >= hoop.y + 6 && withinRim) {
+      score++;
+      spawnParticles();
+      hoop.shake = 20;
+      ball.vy = Math.abs(ball.vy) + 2;
+      ball.vx *= 0.6;
+    }
+
+    prevBallY = ball.y;
+
+    if (hoop.shake > 0) hoop.shake -= 0.4;
+
+    updateParticles();
+    drawHoop();
+    drawParticles();
+    drawBall();
+    drawScore();
+
+    requestAnimationFrame(update);
+  }
+
+  canvas.style.touchAction = 'none';
+
+  canvas.addEventListener('pointerdown', (ev) => {
+    const pos = rectToCanvas(ev.clientX, ev.clientY);
+    const d = Math.hypot(pos.x - ball.x, pos.y - ball.y);
+    if (d <= ball.r + 12) {
+      canvas.setPointerCapture(ev.pointerId);
+      ball.grabbed = true;
+      dragStart = { x: pos.x, y: pos.y };
+      lastPointerPos = { x: pos.x, y: pos.y };
+    }
+  });
+
+  canvas.addEventListener('pointermove', (ev) => {
+    if (!ball.grabbed) return;
+    lastPointerPos = rectToCanvas(ev.clientX, ev.clientY);
+  });
+
+  canvas.addEventListener('pointerup', (ev) => {
+    if (!ball.grabbed) return;
+    const pos = rectToCanvas(ev.clientX, ev.clientY);
+    ball.vx = (dragStart.x - pos.x) * powerK;
+    ball.vy = (dragStart.y - pos.y) * powerK;
+    ball.grabbed = false;
+    dragStart = null;
+    lastPointerPos = null;
+    try { canvas.releasePointerCapture(ev.pointerId); } catch(e) {}
+  });
+
+  canvas.addEventListener('pointercancel', () => {
+    ball.grabbed = false; dragStart = null; lastPointerPos = null;
+  });
+
+  document.getElementById('startBtn').onclick = () => {
+    document.querySelector('#menu').style.display = 'none';
+    gameStarted = true;
+    update();
+  };
+
+  document.getElementById('powerSlider').addEventListener('input', (e) => {
+    powerK = parseFloat(e.target.value);
+    document.getElementById('powerVal').innerText = powerK.toFixed(2);
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    score = 0;
+    ball.x = 240; ball.y = 650; ball.vx = ball.vy = 0;
+    prevBallY = ball.y;
+    drawScore();
+  });
+
+  (function initialRender(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawFloor(); drawHoop(); drawBall();
+    ctx.fillStyle = '#ddd';
+    ctx.font = '16px Arial';
+    ctx.fillText('Press START', 12, canvas.height - 12);
+  })();
+})();
+</script>
+</body>
+</html>
